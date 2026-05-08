@@ -1,0 +1,40 @@
+{
+  "model_id": {
+    "description": "续写模型 ID",
+    "hint": "选择用于续写小说的大语言模型。在 AstrBot 后台 LLM 配置中可查看。",
+    "type": "string",
+    "_special": "select_provider",
+    "default": ""
+  },
+  "system_prompt": {
+    "description": "系统提示词",
+    "hint": "AI 写作的系统级要求，会附加到每次续写请求中。",
+    "type": "string",
+    "format": "textarea",
+    "default": "你是一位资深小说创作大师。请确保内容健康、积极向上，不包含暴力、色情等不良信息。注重剧情连贯、人物塑造和文笔质量。请严格按照大纲和已有章节的风格续写。"
+  },
+  "cron_expression": {
+    "description": "定时续写时间",
+    "hint": "每天自动续写的 Cron 表达式，例如 0 8 * * * 表示每天早 8 点。",
+    "type": "string",
+    "default": "0 8 * * *"
+  },
+  "timezone": {
+    "description": "时区",
+    "hint": "如 Asia/Shanghai",
+    "type": "string",
+    "default": "Asia/Shanhai"
+  },
+  "max_chapter_context": {
+    "description": "参考最近章节数",
+    "hint": "每次续写时参考的最近 N 章内容（推荐 3-5）。",
+    "type": "int",
+    "default": 3
+  },
+  "daily_write_limit": {
+    "description": "每日续写次数上限",
+    "hint": "每本书每天最多可续写的次数。达到上限后会提示友好信息。默认 1 次。",
+    "type": "int",
+    "default": 1
+  }
+}

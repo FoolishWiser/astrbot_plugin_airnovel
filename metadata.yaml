@@ -1,0 +1,4 @@
+name: astrbot_plugin_airnovel
+author: AstrBot User
+version: 1.0.0
+description: AI 自动连载小说工具。Web 管理界面 + 定时 AI 续写 + 局域网 API。
