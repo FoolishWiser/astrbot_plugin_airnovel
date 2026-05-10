@@ -1,0 +1,32 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+gradle/wrapper/*.tmp
+gradle/wrapper/*.lck
+gradle/wrapper/*.ok
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Local
+local.properties
+*.keystore
+*.jks
+
+# Build outputs
+app/build/
+*.apk
+*.aab
+*.ap_
+*.dex
+.verysinc/
+# Misc
+.cxx/
+*.log
+*.tmp
+*.swp
+*.swo
+*~
