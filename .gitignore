@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sync tool
+.verysync/
+
+# Environment
+.env
+.venv/
+venv/
+
+# CodeBuddy
+.codebuddy/
