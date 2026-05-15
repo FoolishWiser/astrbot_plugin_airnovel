@@ -270,11 +270,13 @@ class WebUIServer:
                     f'<div style="margin-top:16px;"><a href="/book/{bid}" class="btn btn-primary">📖 查看书籍</a></div></div>',
                     flash="⚠️ 大纲生成失败", ft="error")
 
-        @app.get("/book/{bid}", response_class=HTMLResponse)
-        async def book_page(bid: str):
+        @app.get("/book/{bid}")
+        async def book_page(bid: str, request: Request):
             meta = self._get_book(bid)
             if not meta:
                 return self._page("<p>书籍不存在</p>", flash="书籍不存在", ft="error")
+            err = request.query_params.get("err", "")
+            err_flash = (err, "error") if err else None
             chapters = meta.get("chapters", [])
             ch_list = "".join(
                 f'<li><span>{ch.get("title","")} <span style="color:var(--neutral-400);font-size:12px;">{(ch.get("updated_at") or "")[:16]}</span></span>'
@@ -303,6 +305,8 @@ class WebUIServer:
             </div>
             {outline}
             <div class="card"><h2>📑 章节 ({len(chapters)})</h2><ul class="chapter-list">{ch_list}</ul></div>'''
+            if err_flash:
+                return self._page(body, flash=err_flash[0], ft=err_flash[1])
             return self._page(body)
 
         @app.get("/book/{bid}/chapter/{cid}", response_class=HTMLResponse)
@@ -331,42 +335,92 @@ class WebUIServer:
             meta = self._get_book(bid)
             if not meta:
                 return JSONResponse({"code": 1, "msg": "书籍不存在"})
-            # 后台异步执行续写
+            # 后台异步执行续写，同时记录旧章节数以便后续跳转到新章节
+            old_count = meta.get("chapter_count", 0)
             async def _delayed():
                 try:
+                    from astrbot import logger as _log
+                    _log.info(f"AirNovel 手动续写开始: {bid}")
                     ok, msg = await self.write_callback(bid)
-                    return ok, msg
+                    new_meta = self._get_book(bid)
+                    new_count = new_meta.get("chapter_count", 0) if new_meta else old_count
+                    _log.info(f"AirNovel 手动续写结果: {msg}")
+                    return ok, msg, old_count, new_count
                 except Exception as e:
-                    return False, str(e)
+                    from astrbot import logger as _log
+                    _log.error(f"AirNovel 手动续写异常: {e}", exc_info=True)
+                    return False, str(e), old_count, old_count
             if not hasattr(self, '_write_results'):
                 self._write_results = {}
             self._write_results[bid] = asyncio.create_task(_delayed())
-            # 返回带 meta refresh 的加载页，5秒后自动跳回书籍页
-            body = (
-                '<div style="text-align:center;padding:60px 20px;">'
-                '<div style="width:48px;height:48px;border:4px solid var(--neutral-200);border-top-color:var(--primary);'
-                'border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 20px;"></div>'
-                '<h2 style="border:none;font-size:20px;margin-bottom:8px;">✍️ 正在续写中...</h2>'
-                '<p style="color:var(--neutral-400);">AI 正在生成下一章内容，请稍候...</p>'
-                '<p style="color:var(--neutral-400);font-size:13px;margin-top:8px;">页面将在完成后自动跳转</p>'
-                '<meta http-equiv="refresh" content="3;url=/book/' + bid + '">'
-                '<style>@keyframes spin{to{transform:rotate(360deg)}}</style>'
-                '</div>'
-            )
-            return self._page(body)
+            # 返回加载页，5秒后检查状态
+            html = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta http-equiv="refresh" content="5;url=/book/""" + bid + """/write-status">
+<title>AirNovel - 续写中</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:-apple-system,'Microsoft YaHei',sans-serif;background:linear-gradient(135deg,#f5f7fa,#e4e9f2);display:flex;justify-content:center;align-items:center;min-height:100vh;}
+.box{text-align:center;background:#fff;padding:48px;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.1);max-width:480px;}
+.spinner{width:48px;height:48px;border:4px solid #e2e8f0;border-top-color:#6366f1;border-radius:50%;animation:s .8s linear infinite;margin:0 auto 20px;}
+@keyframes s{to{transform:rotate(360deg)}}
+h2{font-size:20px;color:#1e293b;margin-bottom:8px;}
+p{color:#64748b;font-size:14px;}
+</style>
+</head>
+<body><div class="box"><div class="spinner"></div><h2>✍️ 正在续写中...</h2><p>AI 正在生成下一章内容</p><p style="margin-top:4px;font-size:12px;color:#94a3b8;">生成后自动跳转到新章节</p></div></body>
+</html>"""
+            from starlette.responses import HTMLResponse
+            return HTMLResponse(content=html, status_code=200)
 
-        @app.get("/book/{bid}/write/check")
-        async def write_check(bid: str):
-            if not hasattr(self, '_write_results') or bid not in self._write_results:
-                return {"done": False}
-            task = self._write_results[bid]
-            if task.done():
-                try:
-                    ok, msg = task.result()
-                    return {"done": True, "ok": ok, "msg": msg}
-                except Exception as e:
-                    return {"done": True, "ok": False, "msg": str(e)}
-            return {"done": False}
+        @app.get("/book/{bid}/write-status")
+        async def write_status(bid: str):
+            """检查续写状态，完成后自动跳转到新章节或书籍页。"""
+            meta = self._get_book(bid)
+            if not meta:
+                from starlette.responses import RedirectResponse
+                return RedirectResponse(url="/")
+            # 检查是否有进行中的写任务
+            task_done = False
+            result = None
+            if hasattr(self, '_write_results') and bid in self._write_results:
+                task = self._write_results[bid]
+                if task.done():
+                    task_done = True
+                    try:
+                        result = task.result()
+                    except Exception as e:
+                        result = (False, str(e), 0, 0)
+            if task_done and result:
+                ok, msg, old_c, new_c = result
+                if ok:
+                    # 成功：跳转到新章节
+                    from starlette.responses import RedirectResponse
+                    return RedirectResponse(url=f"/book/{bid}/chapter/{new_c}")
+                else:
+                    # 失败：跳转到书籍页并显示错误
+                    from starlette.responses import RedirectResponse
+                    resp = RedirectResponse(url=f"/book/{bid}?err={msg}")
+                    return resp
+            # 仍在进行中：继续显示加载页
+            html = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta http-equiv="refresh" content="5;url=/book/""" + bid + """/write-status">
+<title>AirNovel - 续写中</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:-apple-system,'Microsoft YaHei',sans-serif;background:linear-gradient(135deg,#f5f7fa,#e4e9f2);display:flex;justify-content:center;align-items:center;min-height:100vh;}
+.box{text-align:center;background:#fff;padding:48px;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.1);max-width:480px;}
+.spinner{width:48px;height:48px;border:4px solid #e2e8f0;border-top-color:#6366f1;border-radius:50%;animation:s .8s linear infinite;margin:0 auto 20px;}
+@keyframes s{to{transform:rotate(360deg)}}
+h2{font-size:20px;color:#1e293b;margin-bottom:8px;}
+p{color:#64748b;font-size:14px;}
+</style>
+</head>
+<body><div class="box"><div class="spinner"></div><h2>✍️ AI 正在创作中...</h2><p>请耐心等待，生成后自动跳转</p></div></body>
+</html>"""
+            from starlette.responses import HTMLResponse
+            return HTMLResponse(content=html, status_code=200)
 
         @app.get("/book/{bid}/outline", response_class=HTMLResponse)
         async def outline_page(bid: str):

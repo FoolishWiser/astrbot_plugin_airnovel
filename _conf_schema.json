@@ -26,8 +26,8 @@
     "default": "Asia/Shanghai"
   },
   "max_chapter_context": {
-    "description": "参考最近章节数",
-    "hint": "每次续写时参考的最近 N 章内容（推荐 3-5）。",
+    "description": "参考最近章节数（-1 为参考全部）",
+    "hint": "每次续写时参考的最近 N 章内容。设为 -1 则参考所有已写章节（推荐 3-5，-1 会消耗更多 token）。",
     "type": "int",
     "default": 3
   },

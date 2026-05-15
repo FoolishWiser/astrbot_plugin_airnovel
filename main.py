@@ -64,8 +64,21 @@ class AirNovelPlugin(Star):
         except Exception as e:
             logger.error(f"AirNovel 初始化失败: {e}", exc_info=True)
 
+    # 类级别跟踪旧 WebUI 实例，重载时先停止旧实例释放端口
+    _prev_webui: "WebUIServer" = None
+
     async def _start_webui(self):
-        """启动 Web 管理界面（对标 LivingMemory）。"""
+        """启动 Web 管理界面。重载时先停止旧实例释放端口。"""
+        # 停止旧实例（如有）
+        if AirNovelPlugin._prev_webui is not None:
+            try:
+                await AirNovelPlugin._prev_webui.stop()
+                logger.info("已停止旧 WebUI 实例，释放端口")
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"停止旧 WebUI 实例异常: {e}")
+            AirNovelPlugin._prev_webui = None
+
         try:
             self.webui_server = WebUIServer(
                 data_dir=self.data_dir,
@@ -75,8 +88,9 @@ class AirNovelPlugin(Star):
                 config=self.config,
             )
             await self.webui_server.start()
+            AirNovelPlugin._prev_webui = self.webui_server
         except Exception as e:
-            logger.error(f"启动 WebUI 失败: {e}", exc_info=True)
+            logger.error(f"启动 WebUI 失败: {e}")
             self.webui_server = None
 
     # ═════════════════════════════════════════════════════════════
@@ -152,7 +166,10 @@ class AirNovelPlugin(Star):
         if not meta:
             return []
         chapters = meta.get("chapters", [])
-        recent = chapters[-n:] if len(chapters) >= n else chapters
+        if n == -1:
+            recent = chapters  # -1 表示参考全部
+        else:
+            recent = chapters[-n:] if len(chapters) >= n else chapters
         result = []
         for ch in recent:
             fp = self._books_dir() / bid / "chapters" / ch["filename"]
@@ -186,20 +203,36 @@ class AirNovelPlugin(Star):
     # ═════════════════════════════════════════════════════════════
 
     def _register_cron(self):
-        """为每本激活的书籍注册独立的定时任务。"""
+        """为每本激活的书籍注册独立的定时任务（自动去重）。"""
         try:
             import asyncio
+            import sqlite3
             default_cron = self.config.get("cron_expression", "0 8 * * *")
             tz = self.config.get("timezone", "Asia/Shanghai")
             books = self._all_books()
             registered = 0
+
+            # 预清理：从数据库删除同名的旧 cron job
+            db_path = "/AstrBot/data/data_v4.db"
+            try:
+                conn = sqlite3.connect(db_path)
+                for b in books:
+                    if not b.get("activated", True):
+                        continue
+                    jn = f"airnovel_write_{b['book_id']}"
+                    conn.execute("DELETE FROM cron_jobs WHERE name = ?", (jn,))
+                    conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
             for b in books:
                 if not b.get("activated", True):
                     continue
                 bid = b["book_id"]
                 book_cron = b.get("cron", default_cron)
                 job_name = f"airnovel_write_{bid}"
-                # 使用 asyncio.ensure_future 确保协程被执行
+
                 asyncio.ensure_future(
                     self.context.cron_manager.add_basic_job(
                         name=job_name,
@@ -251,6 +284,35 @@ class AirNovelPlugin(Star):
         if not meta:
             return False, "书籍不存在"
         pid = self.config.get("model_id") or None
+        provider = self.context.get_provider_by_id(pid) if pid else self.context.get_using_provider()
+        if not provider:
+            return False, "未配置模型 ID"
+
+        n = self.config.get("max_chapter_context", 3)
+        recent = self._recent_chapters(bid, n)
+        sys_p = self.config.get("system_prompt", "")
+        ctx_lines = []
+        for c in recent:
+            sep = "--- 第" + str(c['id']) + "章 " + c.get('title','') + " ---" + chr(10)
+            ctx_lines.append(sep + c['content'])
+        ctx = chr(10).join(ctx_lines)
+        outline = meta.get('outline', '')
+        NL = chr(10)
+        prompt = ("以下是一部小说的创作资料，请严格续写下一章。" + NL + NL
+            + "【大纲】" + outline + NL
+            + "【已有章节】" + NL + (ctx or "（尚无章节，这是第一章）") + NL + NL
+            + "要求：仅输出下一章的完整正文。延续大纲和已有章节的风格。不输出任何解释说明。")
+        resp: LLMResponse = await provider.text_chat(prompt=prompt, system_prompt=sys_p, contexts=None)
+        if not (resp and resp.role == "assistant" and resp.completion_text):
+            return False, "模型返回异常"
+        content = resp.completion_text.strip()
+        num = meta.get("chapter_count", 0) + 1
+        first = content.split(chr(10))[0][:60]
+        title = first if first and ("第" in first or "章" in first) else f"第{num}章"
+        ch = self._save_chapter(bid, title, content)
+        if ch:
+            return (True, "《" + meta['title'] + "》第" + str(num) + "章完成")
+        return (False, "写入失败")
 
     # ═════════════════════════════════════════════════════════════
     # AstrBot 命令
