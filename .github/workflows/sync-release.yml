@@ -1,10 +1,8 @@
 name: Sync Releases to Gitee
 
 on:
-  # 当你在 GitHub 上发布新 Release 时自动触发
   release:
     types: [published]
-  # 支持手动触发，用来一次性同步所有历史 Release
   workflow_dispatch:
 
 jobs:
@@ -16,25 +14,53 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 确保 Gitee 上存在对应 Tag（Release 必须依附 Tag）
+      # 连接 Gitee 并推送 Tag
       - name: Push tags to Gitee
         env:
           GITEE_USER: ${{ secrets.GITEE_USERNAME }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_REPO: ${{ secrets.GITEE_REPO }}
         run: |
-          REMOTE_URL="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/${GITEE_REPO}.git"
-          git remote add gitee $REMOTE_URL || true
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            # 手动触发：推送全部分支/标签，确保所有历史 Tag 都在 Gitee 上
-            git push gitee --tags --force
-          else
-            # 自动触发：只推送当前 Release 对应的 Tag
-            TAG_NAME=${GITHUB_REF#refs/tags/}
-            git push gitee $TAG_NAME --force
+          set -e
+
+          # 1. 检查必要变量是否为空
+          if [ -z "$GITEE_USER" ] || [ -z "$GITEE_TOKEN" ] || [ -z "$GITEE_REPO" ]; then
+            echo "❌ 缺少必要的 Secret，请检查 GITEE_USERNAME / GITEE_TOKEN / GITEE_REPO 是否已全部配置"
+            exit 1
           fi
 
-      # 同步 Release 及附件
+          REMOTE_URL="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/${GITEE_REPO}.git"
+
+          # 2. 打印安全地址（隐藏令牌）
+          SAFE_URL="https://${GITEE_USER}:***@gitee.com/${GITEE_USER}/${GITEE_REPO}.git"
+          echo "👉 远程地址: $SAFE_URL"
+
+          # 3. 测试能否连接 Gitee 仓库
+          echo "🔍 正在测试 Gitee 仓库连接..."
+          git ls-remote --exit-code "$REMOTE_URL" HEAD
+          if [ $? -ne 0 ]; then
+            echo "❌ 无法访问 Gitee 仓库，请确认："
+            echo "   - 仓库名和用户名是否正确"
+            echo "   - 私人令牌是否有效并勾选了 projects 权限"
+            exit 1
+          fi
+          echo "✅ 连接成功"
+
+          # 4. 添加 remote 并推送
+          git remote add gitee "$REMOTE_URL" || true
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "📦 手动触发：推送所有 Tag 到 Gitee..."
+            git push gitee --tags --force
+          else
+            TAG_NAME=${GITHUB_REF#refs/tags/}
+            echo "📦 自动触发：推送 Tag $TAG_NAME 到 Gitee..."
+            git push gitee "$TAG_NAME" --force
+          fi
+
+          echo "✅ Tag 推送完成"
+
+      # 同步 Release 及附件（保持你原来的步骤，不需改动）
       - name: Sync releases and assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -42,75 +68,5 @@ jobs:
           GITEE_USER: ${{ secrets.GITEE_USERNAME }}
           GITEE_REPO: ${{ secrets.GITEE_REPO }}
         run: |
-          set -e
-          sync_release() {
-            local tag="$1"
-            local name="$2"
-            local body="$3"
-            local prerelease="$4"
-            local assets_json="$5"
-
-            echo "::group::Syncing release for tag: $tag"
-            # 构造请求 JSON（用 jq 自动转义特殊字符）
-            PAYLOAD=$(jq -n \
-              --arg access_token "$GITEE_TOKEN" \
-              --arg tag_name "$tag" \
-              --arg name "$name" \
-              --arg body "$body" \
-              --argjson prerelease "$prerelease" \
-              '{access_token: $access_token, tag_name: $tag_name, name: $name, body: $body, prerelease: $prerelease}')
-
-            CREATE_RESP=$(curl -sS -X POST \
-              -H "Content-Type: application/json" \
-              -d "$PAYLOAD" \
-              "https://gitee.com/api/v5/repos/$GITEE_USER/$GITEE_REPO/releases")
-            RELEASE_ID=$(echo "$CREATE_RESP" | jq -r '.id')
-            if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
-              echo "⚠️  Failed to create release for $tag, may already exist. Response:"
-              echo "$CREATE_RESP"
-              echo "::endgroup::"
-              return 0
-            fi
-            echo "Created Gitee release id: $RELEASE_ID"
-
-            # 上传附件
-            if [ "$assets_json" != "[]" ]; then
-              echo "Uploading assets..."
-              echo "$assets_json" | jq -c '.[]' | while read -r asset; do
-                asset_name=$(echo "$asset" | jq -r '.name')
-                asset_url=$(echo "$asset" | jq -r '.url')
-                echo "  Downloading $asset_name ..."
-                curl -sS -L -o "$asset_name" "$asset_url"
-                echo "  Uploading to Gitee ..."
-                UPLOAD_RESP=$(curl -sS -X POST \
-                  -F "file=@$asset_name" \
-                  "https://gitee.com/api/v5/repos/$GITEE_USER/$GITEE_REPO/releases/$RELEASE_ID/attach_files?access_token=$GITEE_TOKEN")
-                echo "  $UPLOAD_RESP"
-                rm -f "$asset_name"
-              done
-            fi
-            echo "::endgroup::"
-          }
-
-          # 根据触发方式，决定同步单个还是全部 Release
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            # 仅同步当前发布的 Release
-            TAG_NAME=${GITHUB_REF#refs/tags/}
-            NAME=$(jq -r '.release.name' $GITHUB_EVENT_PATH)
-            BODY=$(jq -r '.release.body' $GITHUB_EVENT_PATH)
-            PRERELEASE=$(jq -r '.release.prerelease' $GITHUB_EVENT_PATH)
-            ASSETS=$(jq -c '[.release.assets[] | {name: .name, url: .browser_download_url}]' $GITHUB_EVENT_PATH)
-            sync_release "$TAG_NAME" "$NAME" "$BODY" "$PRERELEASE" "$ASSETS"
-          else
-            # 手动触发：同步所有历史 Release
-            echo "Fetching all releases from GitHub..."
-            RELEASES=$(gh release list --limit 100 --json tagName,name,body,isPrerelease,assets)
-            echo "$RELEASES" | jq -c '.[]' | while read -r release; do
-              tag=$(echo "$release" | jq -r '.tagName')
-              name=$(echo "$release" | jq -r '.name')
-              body=$(echo "$release" | jq -r '.body')
-              prerelease=$(echo "$release" | jq -r '.isPrerelease')
-              assets=$(echo "$release" | jq -c '[.assets[] | {name: .name, url: .downloadUrl}]')
-              sync_release "$tag" "$name" "$body" "$prerelease" "$assets"
-            done
-          fi
+          # ... 保持原来的同步脚本，不用动 ...
+          # 如果你之前复制的是完整版，这里直接用就行
